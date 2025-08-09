@@ -13,6 +13,7 @@ from langchain.memory import ConversationBufferMemory
 from dotenv import load_dotenv
 import logging
 import asyncio
+from mangum import Mangum
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -237,5 +238,7 @@ def cleanup_session(session_id: str):
         del interview_sessions[session_id]
         save_sessions()
         logger.info(f"Cleaned up session {session_id}")
+        
+handler = Mangum(app)
 
 # Install additional dependencies: pip install fastapi uvicorn python-multipart langchain-groq PyPDF2 python-dotenv SpeechRecognition pyaudio pydub

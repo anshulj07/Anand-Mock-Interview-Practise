@@ -1,15 +1,8 @@
 fastapi
 uvicorn
 python-multipart
-langchain
-langchain_groq
-groq
 pydantic
-openai
-PyMuPDF
 PyPDF2
-protobuf==5.27.3
-streamlit-extras==0.7.5
-openai-whisper==20250625
 python-dotenv
+openai
 mangum

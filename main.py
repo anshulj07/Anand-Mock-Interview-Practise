@@ -1,167 +1,145 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from io import BytesIO
 from dotenv import load_dotenv
-from pydantic import BaseModel
 from mangum import Mangum
-import logging
+from pydantic import BaseModel
+from io import BytesIO
 import os
+import PyPDF2
+import openai
+import logging
 import time
 import pickle
 from typing import Dict, List
-import openai
-import PyPDF2
 
-# Logging
+# --- Logging ---
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("main")
 
-# Load env variables
+# --- Env Vars ---
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
-    raise RuntimeError("OPENAI_API_KEY is missing in environment variables")
+    logger.error("OPENAI_API_KEY is missing")
 openai.api_key = OPENAI_API_KEY
 
-# FastAPI app
+# --- App ---
 app = FastAPI()
-handler = Mangum(app)
+handler = Mangum(app)  # For Vercel
 
-# CORS
+# --- CORS ---
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # adjust for production
+    allow_origins=["*"],  # adjust for prod
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-SESSION_FILE = "interview_sessions.pkl"
-interview_sessions: Dict[str, Dict] = {}
-
-# -------- Helpers --------
-def extract_text_from_pdf(file_stream: BytesIO) -> str:
-    reader = PyPDF2.PdfReader(file_stream)
-    text = ""
-    for page in reader.pages:
-        text += page.extract_text() or ""
-    return text.strip()
+# --- Storage ---
+SESSION_FILE = "sessions.pkl"
+sessions: Dict[str, Dict] = {}
 
 def load_sessions():
-    global interview_sessions
+    global sessions
     try:
         with open(SESSION_FILE, "rb") as f:
-            interview_sessions = pickle.load(f)
+            sessions = pickle.load(f)
         logger.info("Sessions loaded.")
     except FileNotFoundError:
-        interview_sessions = {}
+        sessions = {}
     except Exception as e:
-        logger.error(f"Error loading sessions: {e}")
-        interview_sessions = {}
+        logger.error(f"Failed to load sessions: {e}")
+        sessions = {}
 
 def save_sessions():
     try:
         with open(SESSION_FILE, "wb") as f:
-            pickle.dump(interview_sessions, f)
+            pickle.dump(sessions, f)
         logger.info("Sessions saved.")
     except Exception as e:
-        logger.error(f"Error saving sessions: {e}")
+        logger.error(f"Failed to save sessions: {e}")
 
 load_sessions()
 
+# --- Utils ---
+def extract_text_from_pdf(file_stream: BytesIO) -> str:
+    reader = PyPDF2.PdfReader(file_stream)
+    return "\n".join(page.extract_text() or "" for page in reader.pages).strip()
+
 def ask_gpt(prompt: str) -> str:
     try:
-        response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",  # or gpt-4o-mini for faster/cheaper
+        resp = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",
             messages=[{"role": "system", "content": "You are a friendly HR interviewer."},
                       {"role": "user", "content": prompt}],
             temperature=0.7,
             max_tokens=150
         )
-        return response.choices[0].message["content"].strip()
+        return resp.choices[0].message["content"].strip()
     except Exception as e:
-        logger.error(f"OpenAI API error: {e}")
-        raise HTTPException(status_code=500, detail="LLM API call failed.")
+        logger.error(f"OpenAI error: {e}")
+        raise HTTPException(status_code=500, detail="LLM API call failed")
 
-# -------- Models --------
+# --- Models ---
 class UserResponse(BaseModel):
     session_id: str
     answer: str
     is_complete: bool = False
 
-class EndInterviewRequest(BaseModel):
+class SessionID(BaseModel):
     session_id: str
 
-class StartInterviewRequest(BaseModel):
-    session_id: str
-
-# -------- Endpoints --------
+# --- Routes ---
 @app.get("/")
 def home():
-    return {"message": "Hello from FastAPI + OpenAI on Vercel"}
+    return {"message": "Mock Interview API running"}
 
 @app.post("/upload-resume")
 async def upload_resume(resume: UploadFile = File(...)):
     text = extract_text_from_pdf(BytesIO(await resume.read()))
     session_id = str(time.time())
-    interview_sessions[session_id] = {
-        "resume": text,
-        "qa_history": [],
-        "phase": "general",
-        "ended": False
-    }
+    sessions[session_id] = {"resume": text, "qa_history": [], "ended": False}
     save_sessions()
-    return {"success": True, "session_id": session_id}
+    return {"session_id": session_id}
 
 @app.post("/start-interview")
-async def start_interview(req: StartInterviewRequest):
-    session = interview_sessions.get(req.session_id)
-    if not session or session["ended"]:
-        raise HTTPException(status_code=404, detail="Session not found or ended")
-
-    prompt = f"""Ask a short, engaging HR question (max 15 words) based on this resume:
-    {session['resume']}
-    """
-    question = ask_gpt(prompt)
-    session["qa_history"].append({"question": question})
+async def start_interview(req: SessionID):
+    s = sessions.get(req.session_id)
+    if not s or s["ended"]:
+        raise HTTPException(status_code=404, detail="Session not found")
+    question = ask_gpt(f"Ask a short HR question (max 15 words) based on this resume:\n{s['resume']}")
+    s["qa_history"].append({"question": question})
     save_sessions()
-    return {"success": True, "question": question}
+    return {"question": question}
 
 @app.post("/submit-answer")
 async def submit_answer(req: UserResponse):
-    session = interview_sessions.get(req.session_id)
-    if not session or session["ended"]:
-        raise HTTPException(status_code=404, detail="Session not found or ended")
-
-    if not session["qa_history"]:
-        raise HTTPException(status_code=400, detail="No previous question")
-
-    session["qa_history"][-1]["answer"] = req.answer
-    save_sessions()
-
+    s = sessions.get(req.session_id)
+    if not s or s["ended"]:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if not s["qa_history"]:
+        raise HTTPException(status_code=400, detail="No question asked yet")
+    s["qa_history"][-1]["answer"] = req.answer
     if req.is_complete:
-        prompt = f"""Given this resume and Q&A history:
-        Resume: {session['resume']}
-        History: {session['qa_history']}
-        Ask the next relevant question (max 15 words).
-        """
-        question = ask_gpt(prompt)
-        session["qa_history"].append({"question": question})
-        save_sessions()
-        return {"success": True, "question": question}
-
-    return {"success": True}
+        question = ask_gpt(
+            f"Given resume:\n{s['resume']}\n"
+            f"History: {s['qa_history']}\n"
+            f"Ask next short relevant question (max 15 words)."
+        )
+        s["qa_history"].append({"question": question})
+    save_sessions()
+    return {"qa_history": s["qa_history"]}
 
 @app.post("/end-interview")
-async def end_interview(req: EndInterviewRequest):
-    session = interview_sessions.get(req.session_id)
-    if not session or session["ended"]:
-        raise HTTPException(status_code=404, detail="Session not found or ended")
-
-    session["ended"] = True
-    prompt = f"""Provide concise interview feedback for this Q&A:
-    {session['qa_history']}
-    """
-    feedback = ask_gpt(prompt)
+async def end_interview(req: SessionID):
+    s = sessions.get(req.session_id)
+    if not s or s["ended"]:
+        raise HTTPException(status_code=404, detail="Session not found")
+    s["ended"] = True
+    feedback = ask_gpt(
+        f"Provide concise interview feedback for:\n{s['qa_history']}\n"
+        f"Include strengths, areas to improve, clarity & confidence."
+    )
     save_sessions()
-    return {"success": True, "feedback": feedback}
+    return {"feedback": feedback}

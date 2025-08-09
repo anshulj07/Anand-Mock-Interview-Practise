@@ -22,6 +22,10 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 app = FastAPI()
 
+@app.get("/")
+def home():
+    return {"message": "Hello from FastAPI on Vercel"}
+
 # Configure CORS to allow the frontend origin
 app.add_middleware(
     CORSMiddleware,
